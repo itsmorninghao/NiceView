@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../app/theme.dart';
+import '../../../services/download_service.dart';
 import '../domain/history_image.dart';
+import '../domain/random_image.dart';
 import 'widgets/history_preview_viewer.dart';
 
-class HistoryPreviewPage extends StatefulWidget {
+class HistoryPreviewPage extends ConsumerStatefulWidget {
   const HistoryPreviewPage({
     required this.images,
     required this.initialIndex,
@@ -15,12 +18,13 @@ class HistoryPreviewPage extends StatefulWidget {
   final int initialIndex;
 
   @override
-  State<HistoryPreviewPage> createState() => _HistoryPreviewPageState();
+  ConsumerState<HistoryPreviewPage> createState() => _HistoryPreviewPageState();
 }
 
-class _HistoryPreviewPageState extends State<HistoryPreviewPage> {
+class _HistoryPreviewPageState extends ConsumerState<HistoryPreviewPage> {
   late final PageController _pageController;
   late int _index;
+  bool _isSaving = false;
 
   @override
   void initState() {
@@ -89,8 +93,70 @@ class _HistoryPreviewPageState extends State<HistoryPreviewPage> {
               ),
             ),
           ),
+          SafeArea(
+            child: Align(
+              alignment: Alignment.bottomRight,
+              child: Padding(
+                padding: const EdgeInsets.only(right: 22, bottom: 22),
+                child: IconButton.filled(
+                  tooltip: '保存图片',
+                  onPressed: _isSaving ? null : _saveCurrentImage,
+                  icon: _isSaving
+                      ? const SizedBox.square(
+                          dimension: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.download_rounded),
+                  style: IconButton.styleFrom(
+                    backgroundColor: Colors.black.withValues(alpha: 0.50),
+                    foregroundColor: niceText,
+                    disabledBackgroundColor:
+                        Colors.black.withValues(alpha: 0.32),
+                    disabledForegroundColor: niceText.withValues(alpha: 0.58),
+                  ),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
+  }
+
+  Future<void> _saveCurrentImage() async {
+    if (_isSaving || widget.images.isEmpty) {
+      return;
+    }
+    setState(() => _isSaving = true);
+    try {
+      final image = widget.images[_index];
+      await ref.read(downloadServiceProvider).saveImage(
+            RandomImage(
+              localFilePath: image.localFilePath,
+              imageId: image.imageId,
+              galleryId: image.galleryId,
+              contentType: image.contentType,
+              sourceTag: image.sourceTag,
+              fetchedAt: image.fetchedAt,
+            ),
+          );
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('已保存到系统相册')),
+      );
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('保存失败，图片可能已经不在本机了')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isSaving = false);
+      }
+    }
   }
 }
