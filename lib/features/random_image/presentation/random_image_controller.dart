@@ -152,6 +152,7 @@ class RandomImageController extends StateNotifier<RandomImageViewState> {
   final QuotaController _quotaController;
   final QuotaState Function() _readQuotaState;
   final ListQueue<int> _recentImageIds = ListQueue<int>();
+  final Set<String> _pendingConsumedPreloadPaths = <String>{};
 
   bool _initialized = false;
   bool _isPreloading = false;
@@ -172,16 +173,43 @@ class RandomImageController extends StateNotifier<RandomImageViewState> {
       await _tagStore.saveSelectedTag(effectiveSelectedTag);
     }
 
-    final historyImages = await _historyStore.load();
-    final restoredImage = await _restoreLastCurrent(historyImages);
+    var historyImages = await _historyStore.load();
+    var restoredImage = await _restoreLastCurrent(historyImages);
+    var preloadQueue = await _historyStore.loadPreloadQueue(
+      selectedTag: effectiveSelectedTag,
+    );
+    if (restoredImage == null && preloadQueue.isNotEmpty) {
+      restoredImage = preloadQueue.first;
+      preloadQueue = preloadQueue.skip(1).toList();
+      historyImages = await _historyStore.upsertFromRandomImage(restoredImage);
+      if (historyImages.isNotEmpty) {
+        restoredImage = _randomImageFromHistory(historyImages.first);
+      }
+      preloadQueue = await _historyStore.savePreloadQueue(
+        preloadQueue,
+        selectedTag: effectiveSelectedTag,
+      );
+    } else if (restoredImage != null) {
+      preloadQueue = preloadQueue
+          .where((image) => !_isSameImage(image, restoredImage!))
+          .toList();
+      preloadQueue = await _historyStore.savePreloadQueue(
+        preloadQueue,
+        selectedTag: effectiveSelectedTag,
+      );
+    }
     if (!mounted) {
       return;
     }
     if (restoredImage != null) {
       _rememberImageId(restoredImage.imageId);
     }
+    for (final image in preloadQueue) {
+      _rememberImageId(image.imageId);
+    }
     state = state.copyWith(
       currentImage: restoredImage,
+      preloadQueue: preloadQueue,
       userTags: tags,
       selectedTag: effectiveSelectedTag,
       historyImages: historyImages,
@@ -217,19 +245,22 @@ class RandomImageController extends StateNotifier<RandomImageViewState> {
       final queue = [...state.preloadQueue];
       final next = queue.removeAt(0);
       final browsing = _nextBrowseMode(queue.isEmpty);
-      final historyImages = await _historyStore.upsertFromRandomImage(next);
-      if (!mounted) {
-        return;
-      }
+      final generation = _generation;
+      final selectedTag = state.selectedTag;
+      _pendingConsumedPreloadPaths.add(next.localFilePath);
       state = state.copyWith(
         currentImage: next,
         preloadQueue: queue,
-        historyImages: historyImages,
         isImageZoomed: false,
         consecutivePreloadExhaustions: browsing.exhaustions,
         isFastBrowseMode: browsing.isFast,
         preloadTarget: browsing.target,
       );
+      unawaited(_persistConsumedPreloadedImage(
+        next,
+        generation: generation,
+        selectedTag: selectedTag,
+      ));
       unawaited(_fillPreloadQueue(_generation));
       return;
     }
@@ -258,6 +289,7 @@ class RandomImageController extends StateNotifier<RandomImageViewState> {
     }
 
     _generation += 1;
+    await _historyStore.clearPreloadQueue();
     await _tagStore.saveSelectedTag(effectiveTag);
     state = state.copyWith(
       selectedTag: effectiveTag,
@@ -394,17 +426,21 @@ class RandomImageController extends StateNotifier<RandomImageViewState> {
       }
       if (await image.file.exists()) {
         _log('restore last current imageId=${image.imageId}');
-        return RandomImage(
-          localFilePath: image.localFilePath,
-          imageId: image.imageId,
-          galleryId: image.galleryId,
-          contentType: image.contentType,
-          sourceTag: image.sourceTag,
-          fetchedAt: image.fetchedAt,
-        );
+        return _randomImageFromHistory(image);
       }
     }
     return null;
+  }
+
+  RandomImage _randomImageFromHistory(HistoryImage image) {
+    return RandomImage(
+      localFilePath: image.localFilePath,
+      imageId: image.imageId,
+      galleryId: image.galleryId,
+      contentType: image.contentType,
+      sourceTag: image.sourceTag,
+      fetchedAt: image.fetchedAt,
+    );
   }
 
   Future<void> _loadFreshCurrent({bool isInitial = false}) async {
@@ -443,17 +479,7 @@ class RandomImageController extends StateNotifier<RandomImageViewState> {
         'load success generation=$generation imageId=${image.imageId} '
         'path=${image.localFilePath}',
       );
-      if (isInitial) {
-        unawaited(
-          Future<void>.delayed(const Duration(seconds: 2), () {
-            if (mounted && generation == _generation) {
-              return _fillPreloadQueue(generation);
-            }
-          }),
-        );
-      } else {
-        unawaited(_fillPreloadQueue(generation));
-      }
+      unawaited(_fillPreloadQueue(generation));
     } catch (error) {
       if (!mounted || generation != _generation) {
         return;
@@ -491,6 +517,53 @@ class RandomImageController extends StateNotifier<RandomImageViewState> {
       }
     }
     throw lastError ?? const ImageNotFoundException('图片不存在');
+  }
+
+  Future<void> _persistConsumedPreloadedImage(
+    RandomImage image, {
+    required int generation,
+    required String? selectedTag,
+  }) async {
+    try {
+      final historyImages = await _historyStore.upsertFromRandomImage(image);
+      if (!mounted ||
+          generation != _generation ||
+          selectedTag != state.selectedTag) {
+        return;
+      }
+
+      final currentImage = historyImages.isEmpty
+          ? image
+          : _randomImageFromHistory(historyImages.first);
+      _pendingConsumedPreloadPaths.remove(image.localFilePath);
+      final displayedImage = state.currentImage;
+      state = displayedImage != null && _isSameImage(displayedImage, image)
+          ? state.copyWith(
+              currentImage: currentImage,
+              historyImages: historyImages,
+            )
+          : state.copyWith(historyImages: historyImages);
+
+      final preloadQueue = await _historyStore.savePreloadQueue(
+        state.preloadQueue,
+        selectedTag: selectedTag,
+        preservePaths: _pendingConsumedPreloadPaths,
+      );
+      if (!mounted ||
+          generation != _generation ||
+          selectedTag != state.selectedTag) {
+        return;
+      }
+      state = state.copyWith(preloadQueue: preloadQueue);
+    } catch (error) {
+      if (mounted &&
+          generation == _generation &&
+          selectedTag == state.selectedTag) {
+        state = state.copyWith(errorMessage: _messageForError(error));
+      }
+    } finally {
+      _pendingConsumedPreloadPaths.remove(image.localFilePath);
+    }
   }
 
   Future<void> _fillPreloadQueue(int generation) async {
@@ -541,6 +614,7 @@ class RandomImageController extends StateNotifier<RandomImageViewState> {
         }
 
         var added = 0;
+        final queue = [...state.preloadQueue];
         Object? firstError;
         for (final result in results) {
           final error = result.error;
@@ -556,14 +630,24 @@ class RandomImageController extends StateNotifier<RandomImageViewState> {
           }
 
           final image = result.image;
-          if (image == null || _isDuplicate(image)) {
+          if (image == null || _isDuplicate(image, queue)) {
             continue;
           }
           _rememberImageId(image.imageId);
-          state = state.copyWith(
-            preloadQueue: [...state.preloadQueue, image],
-          );
+          queue.add(image);
           added += 1;
+        }
+
+        if (added > 0) {
+          final preloadQueue = await _historyStore.savePreloadQueue(
+            queue,
+            selectedTag: state.selectedTag,
+            preservePaths: _pendingConsumedPreloadPaths,
+          );
+          if (!mounted || generation != _generation) {
+            return;
+          }
+          state = state.copyWith(preloadQueue: preloadQueue);
         }
 
         if (added == 0 && firstError != null) {
@@ -600,7 +684,7 @@ class RandomImageController extends StateNotifier<RandomImageViewState> {
     );
   }
 
-  bool _isDuplicate(RandomImage image) {
+  bool _isDuplicate(RandomImage image, [List<RandomImage>? preloadQueue]) {
     final imageId = image.imageId;
     if (imageId == null) {
       return false;
@@ -611,7 +695,17 @@ class RandomImageController extends StateNotifier<RandomImageViewState> {
     if (state.currentImage?.imageId == imageId) {
       return true;
     }
-    return state.preloadQueue.any((item) => item.imageId == imageId);
+    return (preloadQueue ?? state.preloadQueue)
+        .any((item) => item.imageId == imageId);
+  }
+
+  bool _isSameImage(RandomImage a, RandomImage b) {
+    final aId = a.imageId;
+    final bId = b.imageId;
+    if (aId != null && bId != null) {
+      return aId == bId;
+    }
+    return a.localFilePath == b.localFilePath;
   }
 
   void _rememberImageId(int? imageId) {

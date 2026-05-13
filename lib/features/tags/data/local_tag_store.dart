@@ -12,11 +12,26 @@ class LocalTagStore {
 
   static const _tagsKey = 'nice_view.user_tags';
   static const _selectedTagKey = 'nice_view.selected_tag';
+  static const _defaultTagsMigratedKey = 'nice_view.default_tags_migrated';
+  static const defaultTags = ['原神', '樱岛麻衣'];
 
   final SharedPreferences _preferences;
 
   List<String> loadTags() {
-    return _preferences.getStringList(_tagsKey) ?? <String>[];
+    final tags = _preferences.getStringList(_tagsKey) ?? <String>[];
+    if (_preferences.getBool(_defaultTagsMigratedKey) == true) {
+      return tags;
+    }
+
+    final nextTags = [...tags];
+    for (final tag in defaultTags) {
+      if (!nextTags.any((item) => item.toLowerCase() == tag.toLowerCase())) {
+        nextTags.add(tag);
+      }
+    }
+    _preferences.setStringList(_tagsKey, nextTags);
+    _preferences.setBool(_defaultTagsMigratedKey, true);
+    return nextTags;
   }
 
   Future<void> saveTags(List<String> tags) {

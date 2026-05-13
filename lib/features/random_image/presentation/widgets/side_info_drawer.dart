@@ -116,6 +116,7 @@ class _SectionTitle extends StatelessWidget {
         Expanded(
           child: Text(
             title,
+            overflow: TextOverflow.ellipsis,
             style: const TextStyle(
               color: niceText,
               fontSize: 18,
@@ -123,12 +124,17 @@ class _SectionTitle extends StatelessWidget {
             ),
           ),
         ),
-        Flexible(
-          child: Text(
-            trailing,
-            textAlign: TextAlign.right,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(color: niceAmber, fontSize: 14),
+        const SizedBox(width: 12),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 160),
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: Text(
+              trailing,
+              textAlign: TextAlign.right,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: niceAmber, fontSize: 14),
+            ),
           ),
         ),
       ],

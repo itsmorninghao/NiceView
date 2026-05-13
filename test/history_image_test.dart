@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nice_view/features/random_image/data/random_image_repository.dart';
 import 'package:nice_view/features/random_image/domain/history_image.dart';
+import 'package:nice_view/features/random_image/domain/random_image.dart';
 
 void main() {
   test('empty history list can be sorted by callers', () {
@@ -41,5 +42,25 @@ void main() {
     expect(extensionForContentType('image/webp; charset=utf-8'), '.webp');
     expect(extensionForContentType('image/gif'), '.gif');
     expect(extensionForContentType(null), '.jpg');
+  });
+
+  test('preload queue images parse persisted json', () {
+    final fetchedAt = DateTime(2026, 5, 14, 5, 10);
+    final value = jsonEncode([
+      {
+        'localFilePath': '/tmp/preload_99.jpg',
+        'imageId': 99,
+        'galleryId': 11,
+        'contentType': 'image/jpeg',
+        'sourceTag': '原神',
+        'fetchedAt': fetchedAt.toIso8601String(),
+      },
+    ]);
+
+    final images = RandomImage.listFromJsonString(value);
+
+    expect(images.single.imageId, 99);
+    expect(images.single.sourceTag, '原神');
+    expect(images.single.fetchedAt, fetchedAt);
   });
 }

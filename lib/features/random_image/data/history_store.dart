@@ -20,7 +20,9 @@ class HistoryStore {
 
   static const _historyKey = 'nice_view.history_images';
   static const _lastCurrentKey = 'nice_view.last_current_image';
+  static const _preloadQueueKey = 'nice_view.preload_queue';
   static const _maxHistory = 30;
+  static const _maxPreload = 12;
 
   final SharedPreferences _preferences;
 
@@ -136,6 +138,70 @@ class HistoryStore {
     return images;
   }
 
+  Future<List<RandomImage>> loadPreloadQueue({String? selectedTag}) async {
+    final savedImages = await _loadSavedPreloadQueue();
+    if (savedImages.isEmpty) {
+      return <RandomImage>[];
+    }
+
+    final images = <RandomImage>[];
+    for (final image in savedImages) {
+      if (image.sourceTag != selectedTag) {
+        await _deleteFile(image.localFilePath);
+        continue;
+      }
+      if (await image.file.exists()) {
+        images.add(image);
+      }
+    }
+
+    final retained = images.take(_maxPreload).toList();
+    if (retained.length != savedImages.length) {
+      await _savePreloadQueueMetadata(retained);
+    }
+    return retained;
+  }
+
+  Future<List<RandomImage>> savePreloadQueue(
+    List<RandomImage> images, {
+    String? selectedTag,
+    Set<String> preservePaths = const <String>{},
+  }) async {
+    final previousImages = await _loadSavedPreloadQueue();
+    if (images.isEmpty) {
+      await clearPreloadQueue();
+      return <RandomImage>[];
+    }
+
+    final retained = <RandomImage>[];
+    for (final image in images.take(_maxPreload)) {
+      if (image.sourceTag != selectedTag || !await image.file.exists()) {
+        continue;
+      }
+      final cachePath = await _copyIntoPreloadCache(image);
+      retained.add(image.copyWith(localFilePath: cachePath));
+    }
+
+    final retainedPaths = retained.map((image) => image.localFilePath).toSet();
+    for (final image in previousImages) {
+      if (!retainedPaths.contains(image.localFilePath) &&
+          !preservePaths.contains(image.localFilePath)) {
+        await _deleteFile(image.localFilePath);
+      }
+    }
+
+    await _savePreloadQueueMetadata(retained);
+    return retained;
+  }
+
+  Future<void> clearPreloadQueue() async {
+    final images = await _loadSavedPreloadQueue();
+    for (final image in images) {
+      await _deleteFile(image.localFilePath);
+    }
+    await _preferences.remove(_preloadQueueKey);
+  }
+
   Future<String> _copyIntoHistoryCache(
     File source,
     String historyId,
@@ -153,11 +219,53 @@ class HistoryStore {
     return target.path;
   }
 
+  Future<String> _copyIntoPreloadCache(RandomImage image) async {
+    final source = image.file;
+    final directory = Directory(
+      p.join((await getApplicationSupportDirectory()).path, 'preload'),
+    );
+    await directory.create(recursive: true);
+    if (p.isWithin(directory.path, source.path) ||
+        p.equals(directory.path, p.dirname(source.path))) {
+      return source.path;
+    }
+
+    final imageKey =
+        image.imageId?.toString() ?? DateTime.now().microsecondsSinceEpoch;
+    final target = File(
+      p.join(
+        directory.path,
+        'nice_view_preload_${imageKey}_${DateTime.now().millisecondsSinceEpoch}'
+        '${extensionForContentType(image.contentType)}',
+      ),
+    );
+    await source.copy(target.path);
+    return target.path;
+  }
+
   Future<void> _save(List<HistoryImage> images) async {
     await _preferences.setString(
       _historyKey,
       jsonEncode(images.map((image) => image.toJson()).toList()),
     );
+  }
+
+  Future<void> _savePreloadQueueMetadata(List<RandomImage> images) async {
+    await _preferences.setString(
+      _preloadQueueKey,
+      jsonEncode(images.map((image) => image.toJson()).toList()),
+    );
+  }
+
+  Future<List<RandomImage>> _loadSavedPreloadQueue() async {
+    try {
+      return RandomImage.listFromJsonString(
+        _preferences.getString(_preloadQueueKey),
+      );
+    } catch (_) {
+      await _preferences.remove(_preloadQueueKey);
+      return <RandomImage>[];
+    }
   }
 
   Future<void> _saveLastCurrent(HistoryImage image) {
